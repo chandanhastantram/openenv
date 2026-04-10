@@ -44,6 +44,30 @@ except ImportError:
 DEFAULT_TASK = os.getenv("INCIDENT_TASK", "service-restart")
 
 
+# ─────────────────────────────────────────────────────────
+#  Strict open-interval clamp for ALL rewards/scores.
+#  Duplicated here as a second defense layer.
+# ─────────────────────────────────────────────────────────
+
+def _safe_reward(value: float) -> float:
+    """
+    Clamp reward to the OPEN interval (0.01, 0.99).
+
+    The OpenEnv Phase 2 validator rejects scores that are exactly 0.0 or 1.0.
+    We never allow a reward of 0 or 1 to leave this module.
+    """
+    v = float(value)
+    if v <= 0.0:
+        return 0.01
+    if v >= 1.0:
+        return 0.99
+    if v < 0.01:
+        return 0.01
+    if v > 0.99:
+        return 0.99
+    return v
+
+
 class IncidentOpsEnvironment(Environment):
     """
     IncidentOps: AI Incident Response Training Environment.
@@ -122,6 +146,8 @@ class IncidentOpsEnvironment(Environment):
 
         briefing += self._build_briefing()
 
+        # Reset reward is None — this matches the OpenEnv convention.
+        # The framework's ResetResponse.reward defaults to None.
         return IncidentObservation(
             output=briefing,
             timestamp=self._sim_time(),
@@ -129,7 +155,7 @@ class IncidentOpsEnvironment(Environment):
             severity=self._engine.current_severity,
             affected_services=self._engine.affected_services,
             done=False,
-            reward=0.5,             # Neutral reward at reset (open interval safe)
+            reward=None,
             metadata={
                 "task_name": self._task_name,
                 "episode_id": self._state.episode_id,
@@ -179,17 +205,18 @@ class IncidentOpsEnvironment(Environment):
         timeout_reached = step_num >= self._scenario.max_steps
         self._done = done_by_resolve or timeout_reached
 
-        # Compute final score on termination
+        # Compute reward — always pass through _safe_reward
         if self._done:
             self._final_score = grade(
                 scenario=self._scenario,
                 engine=self._engine,
                 step_count=step_num,
             )
-            reward = self._final_score
+            # _safe_reward is defense-in-depth (grader already clamps)
+            reward = _safe_reward(self._final_score)
         else:
-            # Incremental reward — clamp to open interval
-            reward = max(0.01, min(0.99, 0.5 + incremental_reward))
+            # Incremental reward centred at 0.5, clamped to (0.01, 0.99)
+            reward = _safe_reward(0.5 + incremental_reward)
 
         self._cumulative_reward += incremental_reward
 
@@ -213,7 +240,7 @@ class IncidentOpsEnvironment(Environment):
                 "episode_id": self._state.episode_id,
                 "step": step_num,
                 "command": command,
-                "final_score": self._final_score if self._done else None,
+                "final_score": _safe_reward(self._final_score) if self._done else None,
             },
         )
 
@@ -280,6 +307,7 @@ class IncidentOpsEnvironment(Environment):
         return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def _terminal_observation(self, message: str) -> IncidentObservation:
+        """Return a terminal observation for error/edge cases."""
         return IncidentObservation(
             output=f"\n  {message}\n",
             timestamp=self._sim_time(),
@@ -287,6 +315,6 @@ class IncidentOpsEnvironment(Environment):
             severity="none",
             affected_services=[],
             done=True,
-            reward=0.5,
+            reward=_safe_reward(0.5),   # Always use _safe_reward
             metadata={},
         )

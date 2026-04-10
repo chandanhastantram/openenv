@@ -56,9 +56,11 @@ def test_reset_returns_observation(env, task_name):
 
 
 @pytest.mark.parametrize("task_name", ALL_TASK_NAMES)
-def test_reset_reward_in_open_interval(env, task_name):
+def test_reset_reward_is_none_or_in_open_interval(env, task_name):
     obs = env.reset(task_name=task_name)
-    assert 0.0 < obs.reward < 1.0, f"Reset reward {obs.reward} not in (0, 1)"
+    # Reset reward should be None (framework convention) — or if set, in open interval
+    if obs.reward is not None:
+        assert 0.0 < obs.reward < 1.0, f"Reset reward {obs.reward} not in (0, 1)"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -239,7 +241,8 @@ def test_step_without_service_arg(env):
     for cmd in ["logs", "metrics", "diagnose", "restart", "rollback", "failover"]:
         obs = env.step(_make_action(cmd))
         assert isinstance(obs, IncidentObservation)
-        assert obs.reward >= 0.0
+        assert obs.reward is not None
+        assert 0.0 < obs.reward < 1.0, f"Reward {obs.reward} out of range for '{cmd}'"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -264,3 +267,70 @@ def test_scenario_reproducible_with_same_seed(task_name):
     assert s1.name == s2.name
     assert s1.root_cause_service == s2.root_cause_service
     assert len(s1.alerts) == len(s2.alerts)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  7. Model-level reward clamping
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_model_validator_clamps_zero():
+    """reward=0.0 should be clamped to 0.01."""
+    obs = IncidentObservation(
+        output="test", timestamp="2026-01-01T00:00:00Z",
+        done=False, reward=0.0,
+    )
+    assert obs.reward == 0.01
+
+
+def test_model_validator_clamps_one():
+    """reward=1.0 should be clamped to 0.99."""
+    obs = IncidentObservation(
+        output="test", timestamp="2026-01-01T00:00:00Z",
+        done=False, reward=1.0,
+    )
+    assert obs.reward == 0.99
+
+
+def test_model_validator_clamps_negative():
+    """Negative reward should be clamped to 0.01."""
+    obs = IncidentObservation(
+        output="test", timestamp="2026-01-01T00:00:00Z",
+        done=False, reward=-5.0,
+    )
+    assert obs.reward == 0.01
+
+
+def test_model_validator_preserves_valid():
+    """Valid reward should pass through unchanged."""
+    obs = IncidentObservation(
+        output="test", timestamp="2026-01-01T00:00:00Z",
+        done=False, reward=0.42,
+    )
+    assert obs.reward == 0.42
+
+
+def test_model_validator_none_stays_none():
+    """None reward should remain None."""
+    obs = IncidentObservation(
+        output="test", timestamp="2026-01-01T00:00:00Z",
+        done=False, reward=None,
+    )
+    assert obs.reward is None
+
+
+def test_model_validator_bool_true():
+    """bool True (== 1) should be clamped to 0.99."""
+    obs = IncidentObservation(
+        output="test", timestamp="2026-01-01T00:00:00Z",
+        done=False, reward=True,
+    )
+    assert obs.reward == 0.99
+
+
+def test_model_validator_bool_false():
+    """bool False (== 0) should be clamped to 0.01."""
+    obs = IncidentObservation(
+        output="test", timestamp="2026-01-01T00:00:00Z",
+        done=False, reward=False,
+    )
+    assert obs.reward == 0.01

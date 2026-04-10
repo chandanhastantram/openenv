@@ -16,7 +16,28 @@ State:
 
 from typing import Any, Dict, List, Optional
 
+from pydantic import model_validator
 from openenv.core.env_server.types import Action, Observation
+
+
+# ─────────────────────────────────────────────────────────
+#  Strict open-interval clamp for ALL rewards/scores.
+#  The OpenEnv validator rejects 0.0 and 1.0 exactly.
+#  We use 0.01 / 0.99 to stay safely inside (0, 1).
+# ─────────────────────────────────────────────────────────
+
+def _strict_clamp(value: float) -> float:
+    """Clamp a float to the open interval (0.01, 0.99)."""
+    if value <= 0.0:
+        return 0.01
+    if value >= 1.0:
+        return 0.99
+    # Also guard against values very close to the boundaries
+    if value < 0.01:
+        return 0.01
+    if value > 0.99:
+        return 0.99
+    return float(value)
 
 
 class IncidentAction(Action):
@@ -70,6 +91,7 @@ class IncidentObservation(Observation):
         affected_services: List of service names showing degradation.
         done:              True when the episode has ended.
         reward:            Scalar reward in open interval (0.01, 0.99).
+                           Clamped automatically by model validator.
         metadata:          Pass-through dict for additional info.
     """
 
@@ -78,3 +100,25 @@ class IncidentObservation(Observation):
     alert_count: int = 0
     severity: str = "none"
     affected_services: List[str] = []
+
+    @model_validator(mode="after")
+    def _enforce_reward_open_interval(self) -> "IncidentObservation":
+        """
+        Defense-in-depth: ensure reward is ALWAYS strictly within (0, 1).
+
+        This validator fires on every construction of an IncidentObservation,
+        guaranteeing that no matter what the environment logic produces,
+        the serialized reward will never be exactly 0.0 or 1.0.
+
+        Uses __dict__ assignment to avoid infinite recursion from
+        validate_assignment=True on the parent Observation class.
+        """
+        r = self.reward
+        if r is not None:
+            # Coerce to float first (handles bool, int edge cases)
+            r = float(r)
+            r = _strict_clamp(r)
+            # Direct dict write — bypasses validate_assignment recursion
+            self.__dict__["reward"] = r
+        # If reward is None, leave it — the framework handles None gracefully
+        return self
