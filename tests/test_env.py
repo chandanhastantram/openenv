@@ -26,9 +26,9 @@ from server.graders import grade, GRADERS
 from server.simulation import SimulationEngine
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  Fixtures
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @pytest.fixture
 def env() -> IncidentOpsEnvironment:
@@ -39,9 +39,9 @@ def _make_action(command: str) -> IncidentAction:
     return IncidentAction(command=command)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  1. Reset returns valid observations for all tasks
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @pytest.mark.parametrize("task_name", ALL_TASK_NAMES)
 def test_reset_returns_observation(env, task_name):
@@ -56,16 +56,15 @@ def test_reset_returns_observation(env, task_name):
 
 
 @pytest.mark.parametrize("task_name", ALL_TASK_NAMES)
-def test_reset_reward_is_none_or_in_open_interval(env, task_name):
+def test_reset_reward_in_open_interval(env, task_name):
     obs = env.reset(task_name=task_name)
-    # Reset reward should be None (framework convention) — or if set, in open interval
-    if obs.reward is not None:
-        assert 0.0 < obs.reward < 1.0, f"Reset reward {obs.reward} not in (0, 1)"
+    assert obs.reward is not None
+    assert 0.0 < obs.reward < 1.0, f"Reset reward {obs.reward} not in (0, 1)"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  2. step() returns valid observations with reward in (0, 1)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @pytest.mark.parametrize("task_name", ALL_TASK_NAMES)
 def test_step_reward_strictly_in_open_interval(env, task_name):
@@ -86,9 +85,9 @@ def test_step_output_is_non_empty(env, task_name):
     assert len(obs.output.strip()) > 0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  3. Episode lifecycle — resolve ends the episode
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @pytest.mark.parametrize("task_name", ALL_TASK_NAMES)
 def test_resolve_terminates_episode(env, task_name):
@@ -105,9 +104,9 @@ def test_step_after_done_returns_done(env):
     assert obs.done is True
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  4. Graders produce deterministic in-range scores
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def test_grade_service_restart_optimal():
     """Agent checks payment-processor then restarts it — should score ≥ 0.7."""
@@ -201,9 +200,9 @@ def test_graders_deterministic():
         )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  5. Simulator handles all commands without exceptions
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @pytest.mark.parametrize("task_name", ALL_TASK_NAMES)
 def test_all_commands_execute_without_exception(env, task_name):
@@ -232,7 +231,7 @@ def test_unknown_command_does_not_crash(env):
     env.reset(task_name="service-restart")
     obs = env.step(_make_action("nonexistent_op"))
     assert isinstance(obs, IncidentObservation)
-    assert "unknown" in obs.output.lower() or "❌" in obs.output
+    assert "unknown" in obs.output.lower() or "not found" in obs.output.lower()
 
 
 def test_step_without_service_arg(env):
@@ -245,9 +244,9 @@ def test_step_without_service_arg(env):
         assert 0.0 < obs.reward < 1.0, f"Reward {obs.reward} out of range for '{cmd}'"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  6. Scenario data integrity
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @pytest.mark.parametrize("task_name", ALL_TASK_NAMES)
 def test_scenario_has_minimum_structure(task_name):
@@ -269,9 +268,9 @@ def test_scenario_reproducible_with_same_seed(task_name):
     assert len(s1.alerts) == len(s2.alerts)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  7. Model-level reward clamping
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def test_model_validator_clamps_zero():
     """reward=0.0 should be clamped to 0.01."""

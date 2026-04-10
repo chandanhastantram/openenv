@@ -22,9 +22,9 @@ from .scenarios import Scenario
 from .simulation import SimulationEngine
 
 
-# ─────────────────────────────────────────────────────────
+# ---------------------------------------------------------
 #  Base grader
-# ─────────────────────────────────────────────────────────
+# ---------------------------------------------------------
 
 def _clamp(score: float) -> float:
     """Clamp to open interval (0.01, 0.99)."""
@@ -57,9 +57,9 @@ def _count_cmd_matches(actions: List[str], *prefixes: str) -> int:
     return count
 
 
-# ─────────────────────────────────────────────────────────
+# ---------------------------------------------------------
 #  Task graders
-# ─────────────────────────────────────────────────────────
+# ---------------------------------------------------------
 
 def grade_service_restart(
     scenario: Scenario,
@@ -79,7 +79,7 @@ def grade_service_restart(
     actions = engine.actions_taken
     score = 0.0
 
-    # ── Investigation (0.30) ────────────────────────────
+    # -- Investigation (0.30) ----------------------------
     investigation = 0.0
 
     if _any_cmd_matches(actions, "alerts"):
@@ -95,7 +95,7 @@ def grade_service_restart(
 
     score += min(investigation, 0.30)
 
-    # ── Root-cause identification (0.30) ─────────────────
+    # -- Root-cause identification (0.30) -----------------
     # Proxy: did the agent check payment-processor before restarting it?
     checked_root = _any_cmd_matches(
         actions,
@@ -105,17 +105,17 @@ def grade_service_restart(
     )
     score += 0.30 if checked_root else 0.10
 
-    # ── Remediation (0.30) ───────────────────────────────
+    # -- Remediation (0.30) -------------------------------
     if _any_cmd_matches(actions, "restart payment-processor"):
         score += 0.30
     elif _any_cmd_matches(actions, "restart"):
         score += 0.05      # restarted something wrong
 
-    # ── Communication (0.05) ──────────────────────────────
+    # -- Communication (0.05) ------------------------------
     if _any_cmd_matches(actions, "notify"):
         score += 0.05
 
-    # ── Efficiency (0.05) ────────────────────────────────
+    # -- Efficiency (0.05) --------------------------------
     optimal_steps = 4
     penalty_per_extra = 0.005
     extras = max(0, step_count - optimal_steps)
@@ -142,7 +142,7 @@ def grade_config_drift(
     actions = engine.actions_taken
     score = 0.0
 
-    # ── Investigation (0.30) ────────────────────────────
+    # -- Investigation (0.30) ----------------------------
     investigation = 0.0
 
     if _any_cmd_matches(actions, "alerts"):
@@ -160,7 +160,7 @@ def grade_config_drift(
 
     score += min(investigation, 0.30)
 
-    # ── Root-cause identification (0.30) ─────────────────
+    # -- Root-cause identification (0.30) -----------------
     # Agent must have inspected api-gateway metrics/config to find pool_size
     inspected_root = _any_cmd_matches(
         actions,
@@ -169,7 +169,7 @@ def grade_config_drift(
     )
     score += 0.30 if inspected_root else 0.05
 
-    # ── Remediation (0.30) ───────────────────────────────
+    # -- Remediation (0.30) -------------------------------
     if _any_cmd_matches(actions, "rollback api-gateway"):
         score += 0.30
     elif _any_cmd_matches(actions, "config api-gateway pool_size 100"):
@@ -179,11 +179,11 @@ def grade_config_drift(
     elif _any_cmd_matches(actions, "rollback"):
         score += 0.05      # rolled back wrong service
 
-    # ── Communication (0.05) ──────────────────────────────
+    # -- Communication (0.05) ------------------------------
     if _any_cmd_matches(actions, "notify"):
         score += 0.05
 
-    # ── Efficiency (0.05) ────────────────────────────────
+    # -- Efficiency (0.05) --------------------------------
     optimal_steps = 8
     penalty_per_extra = 0.003
     extras = max(0, step_count - optimal_steps)
@@ -210,7 +210,7 @@ def grade_cascading_failure(
     actions = engine.actions_taken
     score = 0.0
 
-    # ── Investigation (0.30) ────────────────────────────
+    # -- Investigation (0.30) ----------------------------
     investigation = 0.0
 
     if _any_cmd_matches(actions, "alerts"):
@@ -231,7 +231,7 @@ def grade_cascading_failure(
 
     score += min(investigation, 0.30)
 
-    # ── Root-cause identification (0.25) ─────────────────
+    # -- Root-cause identification (0.25) -----------------
     identified_db = _any_cmd_matches(
         actions,
         "diagnose database-primary",
@@ -240,7 +240,7 @@ def grade_cascading_failure(
     )
     score += 0.25 if identified_db else 0.05
 
-    # ── Remediation (0.30) ───────────────────────────────
+    # -- Remediation (0.30) -------------------------------
     did_failover = _any_cmd_matches(actions, "failover database-primary")
     did_cache_restart = _any_cmd_matches(actions, "restart cache-layer")
 
@@ -253,11 +253,11 @@ def grade_cascading_failure(
     elif _any_cmd_matches(actions, "failover", "restart"):
         score += 0.03                  # tried something but wrong targets
 
-    # ── Communication (0.05) ──────────────────────────────
+    # -- Communication (0.05) ------------------------------
     if _any_cmd_matches(actions, "notify"):
         score += 0.05
 
-    # ── Efficiency (0.10) ────────────────────────────────
+    # -- Efficiency (0.10) --------------------------------
     optimal_steps = 15
     penalty_per_extra = 0.004
     extras = max(0, step_count - optimal_steps)
@@ -278,9 +278,9 @@ def grade_cascading_failure(
     return _clamp(score)
 
 
-# ─────────────────────────────────────────────────────────
+# ---------------------------------------------------------
 #  Dispatch
-# ─────────────────────────────────────────────────────────
+# ---------------------------------------------------------
 
 GRADERS = {
     "service-restart":    grade_service_restart,

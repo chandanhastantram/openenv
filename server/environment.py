@@ -44,10 +44,10 @@ except ImportError:
 DEFAULT_TASK = os.getenv("INCIDENT_TASK", "service-restart")
 
 
-# ─────────────────────────────────────────────────────────
+# ---------------------------------------------------------
 #  Strict open-interval clamp for ALL rewards/scores.
 #  Duplicated here as a second defense layer.
-# ─────────────────────────────────────────────────────────
+# ---------------------------------------------------------
 
 def _safe_reward(value: float) -> float:
     """
@@ -99,7 +99,7 @@ class IncidentOpsEnvironment(Environment):
         self._task_name: str = DEFAULT_TASK
         self._cumulative_reward: float = 0.0
 
-    # ─── Core API ─────────────────────────────────────────────────
+    # --- Core API -------------------------------------------------
 
     def reset(
         self,
@@ -128,7 +128,7 @@ class IncidentOpsEnvironment(Environment):
             valid = ", ".join(ALL_TASK_NAMES)
             self._task_name = DEFAULT_TASK
             briefing = (
-                f"⚠️  Unknown task_name. Valid options: {valid}\n"
+                f"  [WARNING] Unknown task_name. Valid options: {valid}\n"
                 f"Loading default task: '{self._task_name}'.\n"
             )
         else:
@@ -146,8 +146,8 @@ class IncidentOpsEnvironment(Environment):
 
         briefing += self._build_briefing()
 
-        # Reset reward is None — this matches the OpenEnv convention.
-        # The framework's ResetResponse.reward defaults to None.
+        # Reset reward must be returned as a valid open interval float.
+        # The Phase 1 validator crashes if it receives null/None here.
         return IncidentObservation(
             output=briefing,
             timestamp=self._sim_time(),
@@ -155,7 +155,7 @@ class IncidentOpsEnvironment(Environment):
             severity=self._engine.current_severity,
             affected_services=self._engine.affected_services,
             done=False,
-            reward=None,
+            reward=_safe_reward(0.5),
             metadata={
                 "task_name": self._task_name,
                 "episode_id": self._state.episode_id,
@@ -223,7 +223,7 @@ class IncidentOpsEnvironment(Environment):
         # Append timeout notice if applicable
         if timeout_reached and not done_by_resolve:
             output += (
-                f"\n\n  ⏰  Episode timeout reached ({self._scenario.max_steps} steps).\n"
+                f"\n\n  [TIMEOUT] Episode timeout reached ({self._scenario.max_steps} steps).\n"
                 f"      Final score computed based on actions taken so far.\n"
             )
 
@@ -253,7 +253,7 @@ class IncidentOpsEnvironment(Environment):
         """Release any resources (nothing to release in this implementation)."""
         pass
 
-    # ─── Helpers ─────────────────────────────────────────────
+    # --- Helpers ---------------------------------------------
 
     def _build_briefing(self) -> str:
         """Build the initial incident briefing shown to the agent."""
@@ -262,15 +262,15 @@ class IncidentOpsEnvironment(Environment):
 
         lines = [
             "",
-            "╔══════════════════════════════════════════════════════════════════╗",
-            "║          IncidentOps — Incident Response Environment              ║",
-            "╚══════════════════════════════════════════════════════════════════╝",
+            "+------------------------------------------------------------------╗",
+            "|          IncidentOps — Incident Response Environment              |",
+            "+------------------------------------------------------------------╝",
             "",
-           f"  📋  Task:        {s.display_name}",
-           f"  ⚙️   Difficulty:  {s.difficulty.upper()}",
-           f"  🕐  Sim-Time:    {s.start_time}",
-           f"  🔔  Alerts:      {len(e.active_alerts)} active",
-           f"  📟  Severity:    {e.current_severity.upper()}",
+           f"  [Task]         {s.display_name}",
+           f"  [Difficulty]   {s.difficulty.upper()}",
+           f"  [Sim-Time]     {s.start_time}",
+           f"  [Alerts]       {len(e.active_alerts)} active",
+           f"  [Severity]     {e.current_severity.upper()}",
             "",
            f"  DESCRIPTION:",
         ]
@@ -281,14 +281,14 @@ class IncidentOpsEnvironment(Environment):
 
         lines += [
             "",
-            "  ─────────────────────────────────────────────────────────────",
+            "  -------------------------------------------------------------",
             "  You are the on-call engineer. Triage the incident, find the",
             "  root cause, remediate it, and type 'resolve' when done.",
             "",
             "  Type 'help' to see all available commands.",
             "  Type 'alerts' to see active alerts.",
             "  Type 'status' for a system-wide dashboard.",
-            "  ─────────────────────────────────────────────────────────────",
+            "  -------------------------------------------------------------",
             "",
         ]
         return "\n".join(lines)

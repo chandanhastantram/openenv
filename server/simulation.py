@@ -14,41 +14,41 @@ from typing import Any, Dict, List, Optional, Tuple
 from .scenarios import Scenario, ServiceState
 
 
-# ─────────────────────────────────────────────────────────
+# ---------------------------------------------------------
 #  Helpers
-# ─────────────────────────────────────────────────────────
+# ---------------------------------------------------------
 
 def _bar(value: float, max_val: float, width: int = 20) -> str:
-    """Render a text progress bar, e.g. [████████░░░░] 73%"""
+    """Render a text progress bar, e.g. [########----] 73%"""
     filled = int(round(width * value / max(max_val, 0.001)))
     filled = min(filled, width)
-    bar = "█" * filled + "░" * (width - filled)
+    bar = "#" * filled + "-" * (width - filled)
     pct = value / max(max_val, 0.001) * 100
     return f"[{bar}] {pct:.1f}%"
 
 
 def _severity_icon(severity: str) -> str:
     icons = {
-        "critical": "🔴",
-        "high": "🟠",
-        "medium": "🟡",
-        "low": "🟢",
+        "critical": "[CRIT]",
+        "high": "[HIGH]",
+        "medium": "[MED]",
+        "low": "[LOW]",
     }
-    return icons.get(severity, "⚪")
+    return icons.get(severity, "[NONE]")
 
 
 def _status_icon(status: str) -> str:
     icons = {
-        "running": "✅",
-        "degraded": "⚠️ ",
-        "down": "❌",
+        "running": "[OK]",
+        "degraded": "[WARN] ",
+        "down": "[ERROR]",
     }
-    return icons.get(status, "❓")
+    return icons.get(status, "[?]")
 
 
-# ─────────────────────────────────────────────────────────
+# ---------------------------------------------------------
 #  SimulationEngine
-# ─────────────────────────────────────────────────────────
+# ---------------------------------------------------------
 
 class SimulationEngine:
     """
@@ -84,7 +84,7 @@ class SimulationEngine:
         self._notified_channels: List[str] = []
         self._alert_list = list(scenario.alerts)  # mutable copy
 
-    # ── Accessors ──────────────────────────────────────
+    # -- Accessors --------------------------------------
 
     @property
     def resolved(self) -> bool:
@@ -113,7 +113,7 @@ class SimulationEngine:
                 return level
         return "none"
 
-    # ── Command dispatcher ─────────────────────────────
+    # -- Command dispatcher -----------------------------
 
     def execute(self, command: str) -> Tuple[str, float, bool]:
         """
@@ -124,7 +124,7 @@ class SimulationEngine:
         """
         cmd = command.strip()
         if not cmd:
-            return "⚠  Empty command. Type 'help' to see available commands.", 0.0, False
+            return "[WARN]  Empty command. Type 'help' to see available commands.", 0.0, False
 
         self._actions_taken.append(cmd)
         parts = cmd.split(None, 3)
@@ -150,7 +150,7 @@ class SimulationEngine:
         handler = dispatch.get(verb)
         if handler is None:
             return (
-                f"❌  Unknown command: '{verb}'. Type 'help' to see available commands.",
+                f"[ERROR]  Unknown command: '{verb}'. Type 'help' to see available commands.",
                 0.0,
                 False,
             )
@@ -158,14 +158,14 @@ class SimulationEngine:
         try:
             return handler(parts)
         except Exception as exc:
-            return f"❌  Command error: {exc}", 0.0, False
+            return f"[ERROR]  Command error: {exc}", 0.0, False
 
-    # ── Individual command handlers ────────────────────
+    # -- Individual command handlers --------------------
 
     def _cmd_help(self, parts: list) -> Tuple[str, float, bool]:
-        lines = ["", "╔══════════════════════════════════════════════════════╗"]
-        lines.append(  "║         IncidentOps Command Reference                ║")
-        lines.append(  "╚══════════════════════════════════════════════════════╝")
+        lines = ["", "+------------------------------------------------------╗"]
+        lines.append(  "|         IncidentOps Command Reference                |")
+        lines.append(  "+------------------------------------------------------╝")
         lines.append("")
         for cmd, desc in self.AVAILABLE_COMMANDS:
             lines.append(f"  {cmd:<42} {desc}")
@@ -176,17 +176,17 @@ class SimulationEngine:
     def _cmd_status(self, parts: list) -> Tuple[str, float, bool]:
         lines = [
             "",
-            "╔══════════════════════════════════════════════════════╗",
-            "║         System Status Dashboard                      ║",
-           f"║  Sim Time: {self._scenario.start_time:<43}║",
-            "╚══════════════════════════════════════════════════════╝",
+            "+------------------------------------------------------╗",
+            "|         System Status Dashboard                      |",
+           f"|  Sim Time: {self._scenario.start_time:<43}|",
+            "+------------------------------------------------------╝",
             "",
             f"  Active Alerts: {len(self._alert_list)}   "
             f"Severity: {self.current_severity.upper()}   "
             f"Affected Services: {len(self.affected_services)}",
             "",
             f"  {'SERVICE':<28} {'STATUS':<12} {'ERR%':<8} {'P99ms':<8} {'CPU%':<8}",
-            "  " + "─" * 68,
+            "  " + "-" * 68,
         ]
         for name, svc in self._services.items():
             icon = _status_icon(svc.status)
@@ -200,13 +200,13 @@ class SimulationEngine:
 
     def _cmd_alerts(self, parts: list) -> Tuple[str, float, bool]:
         if not self._alert_list:
-            return "\n  ✅  No active alerts. All systems nominal.\n", 0.02, False
+            return "\n  [OK]  No active alerts. All systems nominal.\n", 0.02, False
 
         lines = [
             "",
-            "╔══════════════════════════════════════════════════════╗",
-            "║         Active Alerts                                ║",
-            "╚══════════════════════════════════════════════════════╝",
+            "+------------------------------------------------------╗",
+            "|         Active Alerts                                |",
+            "+------------------------------------------------------╝",
             "",
         ]
         for alert in sorted(self._alert_list, key=lambda a: ["critical","high","medium","low"].index(a.severity)):
@@ -236,7 +236,7 @@ class SimulationEngine:
             "",
             f"  Log stream — {svc.display_name} ({svc.name})",
             f"  Status: {svc.status}  |  Version: {svc.version}  |  Restarts: {svc.restart_count}",
-            "  " + "─" * 60,
+            "  " + "-" * 60,
             "",
         ]
         if not svc.logs:
@@ -265,7 +265,7 @@ class SimulationEngine:
             "",
             f"  Metrics — {svc.display_name} ({svc.name})",
             f"  Status: {_status_icon(svc.status)} {svc.status}  |  Version: {svc.version}",
-            "  " + "─" * 60,
+            "  " + "-" * 60,
             "",
             f"  CPU Usage        {_bar(m.cpu_pct, 100)}  {m.cpu_pct:.1f}%",
             f"  Memory           {_bar(m.memory_mb, m.memory_limit_mb)}  {m.memory_mb:.0f}/{m.memory_limit_mb:.0f} MB",
@@ -279,14 +279,14 @@ class SimulationEngine:
 
         if svc.oom_killed:
             lines.append("")
-            lines.append("  ⚠️   OOMKilled: YES — container was terminated due to memory limit exceeded")
+            lines.append("  [WARN]   OOMKilled: YES — container was terminated due to memory limit exceeded")
 
         if svc.config.current:
             lines.append("")
             lines.append("  Configuration:")
             for k, v in svc.config.current.items():
                 desired = svc.config.desired.get(k)
-                flag = "  ⚠️  DRIFTED" if desired is not None and str(v) != str(desired) else ""
+                flag = "  [WARN]  DRIFTED" if desired is not None and str(v) != str(desired) else ""
                 lines.append(f"    {k}: {v}{flag}")
 
         if svc.dependencies:
@@ -304,7 +304,7 @@ class SimulationEngine:
         valid_ids = self._scenario.request_ids
         if req_id not in valid_ids:
             return (
-                f"❌  Request ID '{req_id}' not found in traces.\n"
+                f"[ERROR]  Request ID '{req_id}' not found in traces.\n"
                 f"   Known request IDs: {', '.join(valid_ids[:3])} ...",
                 0.0,
                 False,
@@ -314,7 +314,7 @@ class SimulationEngine:
         lines = [
             "",
             f"  Distributed Trace — {req_id}",
-            "  " + "─" * 60,
+            "  " + "-" * 60,
             "",
         ]
 
@@ -325,7 +325,7 @@ class SimulationEngine:
                 f"  payment-processor    → TIMEOUT   upstream not responding +5000ms",
                 f"  api-gateway          → RESPONDED 503 Service Unavailable +5001ms",
                 "",
-                "  🔴  Trace shows payment-processor as the failing upstream.",
+                "  [CRIT]  Trace shows payment-processor as the failing upstream.",
             ]
         elif scenario_name == "config-drift":
             lines += [
@@ -334,7 +334,7 @@ class SimulationEngine:
                 f"  api-gateway          → TIMEOUT   connection pool exhausted +4201ms",
                 f"  api-gateway          → RESPONDED 504 Gateway Timeout     +4202ms",
                 "",
-                "  🟠  Trace shows api-gateway connection pool starvation.",
+                "  [HIGH]  Trace shows api-gateway connection pool starvation.",
                 "      Pool size config may have regressed (check 'metrics api-gateway').",
             ]
         else:  # cascading-failure
@@ -347,7 +347,7 @@ class SimulationEngine:
                 f"  database-replica     → STALE DATA lag=182s               +12050ms",
                 f"  api-gateway          → RESPONDED 503 upstream error       +12100ms",
                 "",
-                "  🔴  Trace shows: cache miss → cache timeout → stale DB replica.",
+                "  [CRIT]  Trace shows: cache miss → cache timeout → stale DB replica.",
                 "      The underlying cause is further upstream — check database-primary.",
             ]
 
@@ -367,7 +367,7 @@ class SimulationEngine:
 
         lines = [
             "",
-            f"  ── Diagnostic Report: {svc.display_name} ──────────────────",
+            f"  -- Diagnostic Report: {svc.display_name} ------------------",
             f"  Status:   {_status_icon(svc.status)} {svc.status.upper()}",
             f"  Version:  {svc.version}",
             f"  Restarts: {svc.restart_count}",
@@ -427,9 +427,9 @@ class SimulationEngine:
 
             lines.append("")
             if svc.status == "running":
-                lines.append("  ✅  No anomalies detected. This service appears healthy.")
+                lines.append("  [OK]  No anomalies detected. This service appears healthy.")
             else:
-                lines.append("  ⚠️   Service is degraded but no direct root cause identified here.")
+                lines.append("  [WARN]   Service is degraded but no direct root cause identified here.")
                 lines.append("       Check its dependencies.")
 
         lines.append("")
@@ -450,7 +450,7 @@ class SimulationEngine:
         if svc.status == "running":
             # Restarting a healthy service is penalised
             return (
-                f"  ⚠️   {svc.display_name} is already healthy (status: running).\n"
+                f"  [WARN]   {svc.display_name} is already healthy (status: running).\n"
                 f"       Restarting a healthy service may cause unnecessary downtime.\n"
                 f"       Restart aborted. Use 'status' to review which services need attention.\n",
                 -0.05,
@@ -472,22 +472,22 @@ class SimulationEngine:
             svc.metrics.replica_count = max(svc.metrics.replica_count, 1)
             # Clear alerts for this service
             self._alert_list = [a for a in self._alert_list if a.service != service_name]
-            suffix = "\n  ✅  Service successfully restarted. Replicas healthy. Alerts cleared."
+            suffix = "\n  [OK]  Service successfully restarted. Replicas healthy. Alerts cleared."
             reward = 0.35
         else:
             # Partial restart (wrong service or not the fix)
             svc.metrics.restart_count = svc.restart_count
-            suffix = f"\n  ⚠️   {svc.display_name} restarted but root cause may still be present."
+            suffix = f"\n  [WARN]   {svc.display_name} restarted but root cause may still be present."
             reward = -0.03
 
         lines = [
             "",
-            f"  🔄  Restarting {svc.display_name} ...",
+            f"  [RESTART]  Restarting {svc.display_name} ...",
             f"      Sending SIGTERM to {svc.metrics.replica_count} pod(s) ...",
             "      Waiting for graceful shutdown (30s timeout) ...",
             "      Pulling image ... done",
             "      Starting new pod(s) ...",
-            "      Health checks passing ✅",
+            "      Health checks passing [OK]",
             suffix,
             "",
         ]
@@ -505,11 +505,11 @@ class SimulationEngine:
         try:
             target = int(parts[2])
         except ValueError:
-            return f"❌  '{parts[2]}' is not a valid replica count.", 0.0, False
+            return f"[ERROR]  '{parts[2]}' is not a valid replica count.", 0.0, False
 
         if target > svc.metrics.max_replicas:
             return (
-                f"  ❌  Cannot scale beyond max replicas ({svc.metrics.max_replicas}).\n"
+                f"  [ERROR]  Cannot scale beyond max replicas ({svc.metrics.max_replicas}).\n"
                 f"       Requested: {target}. Use a value ≤ {svc.metrics.max_replicas}.",
                 0.0,
                 False,
@@ -518,7 +518,7 @@ class SimulationEngine:
         old = svc.metrics.replica_count
         svc.metrics.replica_count = target
         return (
-            f"\n  ✅  {svc.display_name} scaled from {old} → {target} replicas.\n",
+            f"\n  [OK]  {svc.display_name} scaled from {old} → {target} replicas.\n",
             0.02,
             False,
         )
@@ -540,7 +540,7 @@ class SimulationEngine:
 
         if svc.status == "running" and not is_correct:
             return (
-                f"  ⚠️   {svc.display_name} appears healthy. Rollback unnecessary.\n"
+                f"  [WARN]   {svc.display_name} appears healthy. Rollback unnecessary.\n"
                 f"       Check 'metrics {service_name}' before rolling back.\n",
                 -0.02,
                 False,
@@ -554,18 +554,18 @@ class SimulationEngine:
             svc.metrics.latency_p50_ms = 10
             svc.metrics.latency_p99_ms = 42
             self._alert_list = [a for a in self._alert_list if a.service != service_name]
-            suffix = "  ✅  Rollback successful. Config restored to previous known-good values."
+            suffix = "  [OK]  Rollback successful. Config restored to previous known-good values."
             reward = 0.35
         else:
-            suffix = f"  ⚠️   {svc.display_name} rolled back but underlying problem may persist."
+            suffix = f"  [WARN]   {svc.display_name} rolled back but underlying problem may persist."
             reward = -0.02
 
         lines = [
             "",
-            f"  ⏮️   Rolling back {svc.display_name} ...",
+            f"  [ROLLBACK]   Rolling back {svc.display_name} ...",
             f"      Previous version restore initiated ...",
             "      Config values reverted to pre-deployment snapshot ...",
-            "      Health checks passing ✅",
+            "      Health checks passing [OK]",
             "",
             suffix,
             "",
@@ -605,25 +605,25 @@ class SimulationEngine:
                 if not (a.service == service_name and "replication" in a.title.lower())
             ]
             suffix = (
-                "  ✅  Failover complete. Standby promoted to primary.\n"
+                "  [OK]  Failover complete. Standby promoted to primary.\n"
                 "      Replication lag is now resolving. Cache should recover shortly."
             )
             reward = 0.30
         else:
             suffix = (
-                f"  ⚠️   Failover for {svc.display_name} completed but may not be necessary.\n"
+                f"  [WARN]   Failover for {svc.display_name} completed but may not be necessary.\n"
                 f"       Verify with 'diagnose {service_name}'."
             )
             reward = -0.05
 
         lines = [
             "",
-            f"  🔀  Initiating failover for {svc.display_name} ...",
+            f"  [FAILOVER]  Initiating failover for {svc.display_name} ...",
             "      Verifying standby readiness ...",
             "      Promoting standby to primary ...",
             "      Updating DNS / connection strings ...",
             "      Draining connections from old primary ...",
-            "      Failover complete ✅",
+            "      Failover complete [OK]",
             "",
             suffix,
             "",
@@ -661,17 +661,17 @@ class SimulationEngine:
             svc.metrics.latency_p50_ms = 11
             svc.metrics.latency_p99_ms = 44
             self._alert_list = [a for a in self._alert_list if a.service != service_name]
-            suffix = f"  ✅  Config applied and verified. Service recovering."
+            suffix = f"  [OK]  Config applied and verified. Service recovering."
             reward = 0.35
         else:
-            suffix = f"  ⚠️   Config updated. Monitor service to confirm stability."
+            suffix = f"  [WARN]   Config updated. Monitor service to confirm stability."
             reward = 0.01
 
         lines = [
             "",
-            f"  ⚙️   Updating config on {svc.display_name} ...",
+            f"  [CONFIG]   Updating config on {svc.display_name} ...",
             f"       {key}: {old_value} → {value}",
-            "      Hot-reload applied (no restart required) ✅",
+            "      Hot-reload applied (no restart required) [OK]",
             "",
             suffix,
             "",
@@ -690,7 +690,7 @@ class SimulationEngine:
         message = " ".join(parts[2:]).strip("'\"")
         self._notified_channels.append(channel)
         return (
-            f"\n  📣  Notification sent to #{channel}:\n"
+            f"\n  [NOTIFY]  Notification sent to #{channel}:\n"
             f"       \"{message}\"\n",
             0.02,
             False,
@@ -700,9 +700,9 @@ class SimulationEngine:
         self._resolved = True
         lines = [
             "",
-            "╔══════════════════════════════════════════════════════╗",
-            "║         Incident Resolved                            ║",
-            "╚══════════════════════════════════════════════════════╝",
+            "+------------------------------------------------------╗",
+            "|         Incident Resolved                            |",
+            "+------------------------------------------------------╝",
             "",
             "  The incident has been marked as resolved.",
             "  Final score will be calculated based on your investigation",
@@ -711,7 +711,7 @@ class SimulationEngine:
         ]
         return "\n".join(lines), 0.0, True
 
-    # ── Utilities ──────────────────────────────────────
+    # -- Utilities --------------------------------------
 
     def _find_service(self, name: str) -> Optional[ServiceState]:
         # Exact match first
@@ -726,6 +726,6 @@ class SimulationEngine:
     def _unknown_service(self, name: str) -> str:
         known = ", ".join(sorted(self._services.keys()))
         return (
-            f"❌  Service '{name}' not found.\n"
+            f"[ERROR]  Service '{name}' not found.\n"
             f"   Known services: {known}"
         )
