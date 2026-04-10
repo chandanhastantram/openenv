@@ -49,6 +49,13 @@ app = create_app(
     env_name="incident_ops_env",
 )
 
+@app.get("/")
+def read_root():
+    return {
+        "status": "ok",
+        "message": "IncidentOps OpenEnv Server is running. The root endpoint has no UI.",
+        "endpoints": ["/reset", "/step", "/metadata", "/schema", "/health"]
+    }
 
 def main() -> None:
     """
