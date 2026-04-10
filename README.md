@@ -1,3 +1,12 @@
+---
+title: IncidentOps SRE Environment
+emoji: 🚨
+colorFrom: red
+colorTo: gray
+sdk: docker
+app_port: 8000
+---
+
 # IncidentOps — AI Incident Response Training Environment
 
 [![OpenEnv](https://img.shields.io/badge/OpenEnv-compatible-blue)](https://github.com/meta-pytorch/OpenEnv)
