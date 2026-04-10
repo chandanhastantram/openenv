@@ -101,24 +101,29 @@ class IncidentObservation(Observation):
     severity: str = "none"
     affected_services: List[str] = []
 
-    @model_validator(mode="after")
-    def _enforce_reward_open_interval(self) -> "IncidentObservation":
+    @model_validator(mode="before")
+    @classmethod
+    def _enforce_reward_open_interval(cls, data: Any) -> Any:
         """
         Defense-in-depth: ensure reward is ALWAYS strictly within (0, 1).
 
         This validator fires on every construction of an IncidentObservation,
         guaranteeing that no matter what the environment logic produces,
-        the serialized reward will never be exactly 0.0 or 1.0.
+        the serialized reward (via model_dump / HTTP JSON) will never be
+        exactly 0.0 or 1.0.
 
-        Uses __dict__ assignment to avoid infinite recursion from
-        validate_assignment=True on the parent Observation class.
+        WHY mode="before" (not "after"):
+          Pydantic v2 mode="after" validators are called with a fully-built
+          model instance and MUST return `self` — returning a model_copy is
+          silently discarded when validated via __init__.  mode="before" gives
+          us the raw input dict/object before construction, so we can normalize
+          the reward in-place.  The clamped value is then stored through
+          Pydantic's proper field machinery, making it visible to model_dump()
+          and therefore to the HTTP serialiser.
         """
-        r = self.reward
-        if r is not None:
-            # Coerce to float first (handles bool, int edge cases)
-            r = float(r)
-            r = _strict_clamp(r)
-            # Direct dict write — bypasses validate_assignment recursion
-            self.__dict__["reward"] = r
-        # If reward is None, leave it — the framework handles None gracefully
-        return self
+        if isinstance(data, dict):
+            r = data.get("reward")
+            if r is not None:
+                data = dict(data)          # don't mutate the caller's dict
+                data["reward"] = _strict_clamp(float(r))
+        return data
