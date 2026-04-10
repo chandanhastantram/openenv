@@ -49,13 +49,13 @@ app = create_app(
     env_name="incident_ops_env",
 )
 
+from fastapi.responses import RedirectResponse
+
 @app.get("/")
 def read_root():
-    return {
-        "status": "ok",
-        "message": "IncidentOps OpenEnv Server is running. The root endpoint has no UI.",
-        "endpoints": ["/reset", "/step", "/metadata", "/schema", "/health"]
-    }
+    # Redirect root visits directly to the OpenEnv metadata so it looks nice
+    # and professional, matching the older environment style.
+    return RedirectResponse(url="/metadata")
 
 def main() -> None:
     """
