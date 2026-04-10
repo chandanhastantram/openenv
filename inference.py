@@ -4,13 +4,16 @@ IncidentOps Baseline Inference Script.
 Runs a language model agent against all three IncidentOps tasks and produces
 a reproducible baseline score. Emits structured log output to stdout.
 
+This script is SELF-CONTAINED: it communicates with the environment server
+via plain HTTP (urllib), so it works without the incident_ops_env package
+being installed.
+
 Environment variables (mandatory before submission):
     API_BASE_URL   — LLM API endpoint (default: https://router.huggingface.co/v1)
     MODEL_NAME     — Model identifier  (default: Qwen/Qwen2.5-72B-Instruct)
     HF_TOKEN       — Hugging Face token / API key
 
 Optional:
-    LOCAL_IMAGE_NAME — Docker image name if connecting to a local container
     INCIDENT_BASE_URL — Running server URL (default: http://localhost:8000)
 
 Stdout format (as required by OpenEnv):
@@ -19,13 +22,15 @@ Stdout format (as required by OpenEnv):
     [END]   success=<true|false> steps=<n> rewards=<r1,r2,...>
 """
 
+import json
 import os
 import re
 import sys
 import textwrap
-from typing import List, Optional
+import urllib.error
+import urllib.request
+from typing import Any, Dict, List, Optional
 
-from openai import OpenAI
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Configuration
@@ -34,7 +39,6 @@ from openai import OpenAI
 API_BASE_URL: str = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 API_KEY: Optional[str] = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 MODEL_NAME: str = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
-LOCAL_IMAGE_NAME: Optional[str] = os.getenv("LOCAL_IMAGE_NAME")
 INCIDENT_BASE_URL: str = os.getenv("INCIDENT_BASE_URL", "http://localhost:8000")
 
 ENV_NAME = "incident_ops_env"
@@ -67,6 +71,78 @@ def log_end(success: bool, steps: int, rewards: List[float]) -> None:
         f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
         flush=True,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Pure-HTTP environment client (no package import required)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _http_post(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """POST JSON to *url* and return the parsed JSON response."""
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code} from {url}: {body}") from exc
+
+
+class _Obs:
+    """Lightweight observation wrapper over the raw API dict."""
+
+    def __init__(self, raw: Dict[str, Any]) -> None:
+        obs = raw.get("observation", raw)
+        self.output: str = obs.get("output", "")
+        self.timestamp: str = obs.get("timestamp", "")
+        self.alert_count: int = int(obs.get("alert_count", 0))
+        self.severity: str = obs.get("severity", "none")
+        self.affected_services: List[str] = obs.get("affected_services", [])
+        self.done: bool = bool(obs.get("done", False))
+        # reward may live at top level or inside observation
+        self.reward: float = float(raw.get("reward") or obs.get("reward") or 0.5)
+
+
+class EnvHttpClient:
+    """Talks to the IncidentOps server via HTTP without any package imports."""
+
+    def __init__(self, base_url: str) -> None:
+        self.base_url = base_url.rstrip("/")
+
+    def reset(self, task_name: str) -> _Obs:
+        resp = _http_post(f"{self.base_url}/reset", {"task_name": task_name})
+        return _Obs(resp)
+
+    def step(self, command: str) -> _Obs:
+        resp = _http_post(f"{self.base_url}/step", {"command": command})
+        return _Obs(resp)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  LLM client (openai SDK — listed as a dependency so it will be installed)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _call_llm(client: Any, messages: List[Dict[str, str]]) -> str:
+    """Call the LLM and return the response text, or '' on failure."""
+    try:
+        from openai import OpenAI  # imported here to give a clear error if missing
+        completion = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            temperature=TEMPERATURE,
+            max_tokens=MAX_TOKENS,
+            stream=False,
+        )
+        return completion.choices[0].message.content or ""
+    except Exception as exc:
+        print(f"[DEBUG] LLM call failed: {exc}", file=sys.stderr, flush=True)
+        return ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -112,14 +188,12 @@ RULES:
 #  Action parser
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Valid command verbs
 VALID_VERBS = {
     "help", "status", "alerts", "logs", "metrics", "trace",
     "diagnose", "restart", "scale", "rollback", "failover",
     "config", "notify", "resolve",
 }
 
-# Strip common LLM preamble like "Action: ..." or "Next action: ..."
 _PREAMBLE_RE = re.compile(r"^(action|next action|command)[:\-]\s*", re.IGNORECASE)
 
 
@@ -147,7 +221,7 @@ def parse_action(response_text: str) -> str:
 #  Agent loop (one task)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_task(client: OpenAI, env_client, task_name: str) -> None:
+def run_task(llm_client: Any, env: EnvHttpClient, task_name: str) -> None:
     """Run one complete task episode and emit structured logs."""
     log_start(task=task_name, env=ENV_NAME, model=MODEL_NAME)
 
@@ -158,12 +232,11 @@ def run_task(client: OpenAI, env_client, task_name: str) -> None:
 
     try:
         # ── Reset ─────────────────────────────────────────────────────
-        reset_result = env_client.reset(task_name=task_name)
-        obs = reset_result.observation
+        obs = env.reset(task_name=task_name)
 
         for step_idx in range(1, MAX_STEPS + 1):
             if obs.done:
-                success = (reset_result.reward or 0.0) > 0.5
+                success = obs.reward > 0.5
                 break
 
             # ── Build prompt ──────────────────────────────────────────
@@ -185,41 +258,34 @@ def run_task(client: OpenAI, env_client, task_name: str) -> None:
             """).strip()
 
             # ── Call LLM ─────────────────────────────────────────────
-            try:
-                completion = client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": user_content},
-                    ],
-                    temperature=TEMPERATURE,
-                    max_tokens=MAX_TOKENS,
-                    stream=False,
-                )
-                response_text = completion.choices[0].message.content or ""
-            except Exception as exc:
-                response_text = ""
-                print(f"[DEBUG] LLM call failed: {exc}", file=sys.stderr, flush=True)
-
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ]
+            response_text = _call_llm(llm_client, messages)
             action_str = parse_action(response_text)
 
             # ── Step environment ──────────────────────────────────────
             try:
-                from incident_ops_env import IncidentAction
-                step_result = env_client.step(IncidentAction(command=action_str))
-            except Exception:
-                # Fallback: try sending a raw dict
-                step_result = env_client.step({"command": action_str})
+                obs = env.step(action_str)
+            except Exception as exc:
+                print(f"[DEBUG] env.step failed: {exc}", file=sys.stderr, flush=True)
+                # Emit a mid-episode error step and abort this task
+                log_step(step=step_idx, action=action_str, reward=0.5, done=True, error=str(exc))
+                rewards.append(0.5)
+                steps_taken = step_idx
+                success = False
+                return
 
-            obs = step_result.observation
-            reward = float(step_result.reward or 0.5)
+            reward = float(obs.reward)
+            # Clamp into the open interval (0, 1) as the validator requires
+            reward = max(0.01, min(0.99, reward))
             done = obs.done
-            error = None  # text-based env has no per-step errors
 
             rewards.append(reward)
             steps_taken = step_idx
 
-            log_step(step=step_idx, action=action_str, reward=reward, done=done, error=error)
+            log_step(step=step_idx, action=action_str, reward=reward, done=done, error=None)
             history.append(f"Step {step_idx}: {action_str} -> reward {reward:.2f}")
 
             if done:
@@ -246,28 +312,20 @@ def main() -> None:
         )
         sys.exit(1)
 
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-
-    # Connect to the environment server
-    if LOCAL_IMAGE_NAME:
-        # Spin up a local Docker container
-        from incident_ops_env import IncidentOpsEnv
-        env_client = IncidentOpsEnv.from_docker_image(LOCAL_IMAGE_NAME)
-        owns_env = True
-    else:
-        # Connect to an already-running server
-        from incident_ops_env import IncidentOpsEnv
-        env_client = IncidentOpsEnv(base_url=INCIDENT_BASE_URL).sync().__enter__()
-        owns_env = False
-
+    # Import OpenAI here so a missing install gives a clear message
     try:
-        for task in TASKS:
-            run_task(client=client, env_client=env_client, task_name=task)
-    finally:
-        if owns_env:
-            env_client.close()
-        elif hasattr(env_client, "__exit__"):
-            env_client.__exit__(None, None, None)
+        from openai import OpenAI
+    except ImportError:
+        print("[ERROR] 'openai' package not installed. Run: pip install openai", file=sys.stderr)
+        sys.exit(1)
+
+    llm_client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+
+    # Connect to the already-running environment server via plain HTTP
+    env = EnvHttpClient(base_url=INCIDENT_BASE_URL)
+
+    for task in TASKS:
+        run_task(llm_client=llm_client, env=env, task_name=task)
 
 
 if __name__ == "__main__":
