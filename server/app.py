@@ -49,13 +49,30 @@ app = create_app(
     env_name="incident_ops_env",
 )
 
-from fastapi.responses import RedirectResponse
-
 @app.get("/")
 def read_root():
-    # Redirect root visits directly to the OpenEnv metadata so it looks nice
-    # and professional, matching the older environment style.
-    return RedirectResponse(url="/metadata")
+    # Hugging Face Spaces proxy strips absolute redirects like /metadata, causing 404s.
+    # By returning the environment metadata directly on the root endpoint, 
+    # the browser will immediately display the rich JSON payload.
+    return {
+        "name": "incident-ops-env",
+        "version": "1.0.0",
+        "spec": "openenv",
+        "tasks": [
+            "service-restart",
+            "config-drift",
+            "cascading-failure"
+        ],
+        "endpoints": [
+            "/reset",
+            "/step",
+            "/state",
+            "/metadata",
+            "/schema",
+            "/health"
+        ],
+        "note": "All /step and /state calls require a session_id from /reset."
+    }
 
 def main() -> None:
     """
