@@ -84,11 +84,11 @@ def log_step(step: int, action: str, reward: float, done: bool, error: Optional[
     )
 
 
-def log_end(success: bool, steps: int, rewards: List[float]) -> None:
+def log_end(success: bool, steps: int, rewards: List[float], score: float) -> None:
     # Use 4 decimal places for each reward value
     rewards_str = ",".join(f"{r:.4f}" for r in rewards)
     print(
-        f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
+        f"[END] success={str(success).lower()} steps={steps} score={score:.4f} rewards={rewards_str}",
         flush=True,
     )
 
@@ -433,7 +433,9 @@ async def run_task_ws(llm_client: Any, base_url: str, task_name: str) -> None:
         await env.close()
         if not rewards:
             rewards.append(0.5)
-        log_end(success=success, steps=steps_taken, rewards=rewards)
+        # Compute final score as mean of episode rewards, clamped to strict (0.01, 0.99)
+        final_score = _clamp(sum(rewards) / len(rewards))
+        log_end(success=success, steps=steps_taken, rewards=rewards, score=final_score)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -533,7 +535,9 @@ def run_task_http(llm_client: Any, base_url: str, task_name: str) -> None:
     finally:
         if not rewards:
             rewards.append(0.5)
-        log_end(success=success, steps=steps_taken, rewards=rewards)
+        # Compute final score as mean of episode rewards, clamped to strict (0.01, 0.99)
+        final_score = _clamp(sum(rewards) / len(rewards))
+        log_end(success=success, steps=steps_taken, rewards=rewards, score=final_score)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
