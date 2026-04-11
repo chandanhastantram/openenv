@@ -4,9 +4,12 @@ IncidentOps Baseline Inference Script.
 Runs a language model agent against all three IncidentOps tasks and produces
 a reproducible baseline score. Emits structured log output to stdout.
 
-This script is SELF-CONTAINED: it communicates with the environment server
-via plain HTTP (urllib), so it works without the incident_ops_env package
-being installed.
+Communication strategy:
+  PRIMARY  — WebSocket (/ws) which maintains session state, so every step
+             actually executes inside the same environment instance and the
+             grader is correctly invoked at episode end.
+  FALLBACK — Plain HTTP (/reset + /step) used only if the websockets package
+             is unavailable in the execution environment.
 
 Environment variables (mandatory before submission):
     API_BASE_URL   — LLM API endpoint (default: https://router.huggingface.co/v1)
@@ -18,7 +21,7 @@ Optional:
 
 Stdout format (as required by OpenEnv):
     [START] task=<task_name> env=incident_ops_env model=<model>
-    [STEP]  step=<n> action=<cmd> reward=<0.00> done=<true|false> error=<msg|null>
+    [STEP]  step=<n> action=<cmd> reward=<0.0000> done=<true|false> error=<msg|null>
     [END]   success=<true|false> steps=<n> rewards=<r1,r2,...>
 """
 
@@ -46,8 +49,22 @@ ENV_NAME = "incident_ops_env"
 TASKS = ["service-restart", "config-drift", "cascading-failure"]
 MAX_STEPS = 20
 TEMPERATURE = 0.1
-MAX_TOKENS = 120
+MAX_TOKENS = 200
 FALLBACK_ACTION = "status"
+
+# Strict open-interval clamp: validator rejects exactly 0.0 or 1.0
+_REWARD_MIN = 0.01
+_REWARD_MAX = 0.99
+
+
+def _clamp(reward: float) -> float:
+    """Clamp reward strictly inside (0, 1)."""
+    try:
+        r = float(reward)
+    except (TypeError, ValueError):
+        r = 0.5
+    return max(_REWARD_MIN, min(_REWARD_MAX, r))
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Structured logging (required format)
@@ -60,7 +77,7 @@ def log_start(task: str, env: str, model: str) -> None:
 def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
     err = error if error else "null"
     done_str = str(done).lower()
-    # Use 4 decimal places to avoid rounding to 0.00 or 1.00 for boundary values
+    # Use 4 decimal places — prevents rounding to 0.0000 or 1.0000
     print(
         f"[STEP] step={step} action={action} reward={reward:.4f} done={done_str} error={err}",
         flush=True,
@@ -68,7 +85,7 @@ def log_step(step: int, action: str, reward: float, done: bool, error: Optional[
 
 
 def log_end(success: bool, steps: int, rewards: List[float]) -> None:
-    # Use 4 decimal places to avoid rounding to 0.0000 or 1.0000 for boundary values
+    # Use 4 decimal places for each reward value
     rewards_str = ",".join(f"{r:.4f}" for r in rewards)
     print(
         f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
@@ -77,15 +94,120 @@ def log_end(success: bool, steps: int, rewards: List[float]) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Pure-HTTP environment client (no package import required)
+#  URL helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _http_base_url(base: str) -> str:
+    """Ensure URL uses http/https scheme."""
+    url = base.rstrip("/")
+    if url.startswith("ws://"):
+        url = "http://" + url[5:]
+    elif url.startswith("wss://"):
+        url = "https://" + url[6:]
+    return url
+
+
+def _ws_url(base: str) -> str:
+    """Convert base HTTP URL to WebSocket URL for the /ws endpoint."""
+    url = base.rstrip("/")
+    if url.startswith("http://"):
+        url = "ws://" + url[7:]
+    elif url.startswith("https://"):
+        url = "wss://" + url[8:]
+    elif not url.startswith("ws://") and not url.startswith("wss://"):
+        url = "ws://" + url
+    return url + "/ws"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  WebSocket environment client (STATEFUL — primary path)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _WSObs:
+    """Observation wrapper for WebSocket responses."""
+
+    def __init__(self, data: Dict[str, Any]) -> None:
+        obs = data.get("observation", {})
+        self.output: str = obs.get("output", "")
+        self.timestamp: str = obs.get("timestamp", "")
+        self.alert_count: int = int(obs.get("alert_count", 0))
+        self.severity: str = obs.get("severity", "none")
+        self.affected_services: List[str] = obs.get("affected_services", [])
+        # done and reward are at the TOP-LEVEL of data (not inside observation)
+        self.done: bool = bool(data.get("done", False))
+        raw_reward = data.get("reward")
+        self.reward: float = _clamp(float(raw_reward) if raw_reward is not None else 0.5)
+
+
+class EnvWSClient:
+    """
+    Stateful WebSocket client for the IncidentOps server.
+
+    Uses the openenv-core WebSocket protocol:
+      reset: {"type": "reset", "data": {"task_name": "..."}}
+      step:  {"type": "step",  "data": {"command": "..."}}
+    """
+
+    def __init__(self, base_url: str) -> None:
+        self._ws_url = _ws_url(base_url)
+        self._ws = None
+
+    async def _connect(self) -> None:
+        import websockets  # type: ignore[import]
+        self._ws = await websockets.connect(
+            self._ws_url,
+            open_timeout=15,
+            close_timeout=5,
+        )
+
+    async def _send(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        import websockets  # type: ignore[import]
+        await self._ws.send(json.dumps(msg))
+        raw = await self._ws.recv()
+        return json.loads(raw)
+
+    async def reset(self, task_name: str) -> _WSObs:
+        resp = await self._send({"type": "reset", "data": {"task_name": task_name}})
+        return _WSObs(resp.get("data", {}))
+
+    async def step(self, command: str) -> _WSObs:
+        resp = await self._send({"type": "step", "data": {"command": command}})
+        return _WSObs(resp.get("data", {}))
+
+    async def close(self) -> None:
+        if self._ws:
+            await self._ws.close()
+            self._ws = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  HTTP environment client (STATELESS — fallback only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _HTTPObs:
+    """Observation wrapper for HTTP responses."""
+
+    def __init__(self, raw: Dict[str, Any]) -> None:
+        obs = raw.get("observation", raw)
+        self.output: str = obs.get("output", "")
+        self.timestamp: str = obs.get("timestamp", "")
+        self.alert_count: int = int(obs.get("alert_count", 0))
+        self.severity: str = obs.get("severity", "none")
+        self.affected_services: List[str] = obs.get("affected_services", [])
+        # done lives at the TOP LEVEL (not inside the observation dict)
+        top_done = raw.get("done")
+        self.done: bool = bool(top_done) if top_done is not None else bool(obs.get("done", False))
+        # Use explicit None check to avoid falsiness swallowing 0.0
+        raw_reward = raw.get("reward")
+        if raw_reward is None:
+            raw_reward = obs.get("reward")
+        self.reward: float = _clamp(float(raw_reward) if raw_reward is not None else 0.5)
+
+
 def _http_post(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """POST JSON to *url* and return the parsed JSON response."""
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        url,
-        data=data,
+        url, data=data,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
@@ -97,49 +219,24 @@ def _http_post(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         raise RuntimeError(f"HTTP {exc.code} from {url}: {body}") from exc
 
 
-class _Obs:
-    """Lightweight observation wrapper over the raw API dict."""
-
-    def __init__(self, raw: Dict[str, Any]) -> None:
-        obs = raw.get("observation", raw)
-        self.output: str = obs.get("output", "")
-        self.timestamp: str = obs.get("timestamp", "")
-        self.alert_count: int = int(obs.get("alert_count", 0))
-        self.severity: str = obs.get("severity", "none")
-        self.affected_services: List[str] = obs.get("affected_services", [])
-        # CRITICAL: done is at the TOP LEVEL of the response (not inside observation dict)
-        # serialize_observation() places done at the top level, not inside observation.
-        top_done = raw.get("done")
-        self.done: bool = bool(top_done) if top_done is not None else bool(obs.get("done", False))
-        # reward may live at top level or inside observation.
-        # Use explicit None check (not truthiness) to avoid dropping 0.0 rewards.
-        raw_reward = raw.get("reward")
-        if raw_reward is None:
-            raw_reward = obs.get("reward")
-        if raw_reward is None:
-            raw_reward = 0.5
-        self.reward: float = float(raw_reward)
-
-
-class EnvHttpClient:
-    """Talks to the IncidentOps server via HTTP without any package imports."""
+class EnvHTTPClient:
+    """Stateless HTTP client (fallback only — each step runs on a fresh env)."""
 
     def __init__(self, base_url: str) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url = _http_base_url(base_url)
 
-    def reset(self, task_name: str) -> _Obs:
+    def reset(self, task_name: str) -> _HTTPObs:
         resp = _http_post(f"{self.base_url}/reset", {"task_name": task_name})
-        return _Obs(resp)
+        return _HTTPObs(resp)
 
-    def step(self, command: str) -> _Obs:
-        # The /step endpoint requires the action wrapped under the "action" key.
-        # Format: {"action": {"command": "..."}}
+    def step(self, command: str) -> _HTTPObs:
+        # The /step endpoint wraps the action under the "action" key
         resp = _http_post(f"{self.base_url}/step", {"action": {"command": command}})
-        return _Obs(resp)
+        return _HTTPObs(resp)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  LLM client (openai SDK — listed as a dependency so it will be installed)
+#  LLM client
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _call_llm(client: Any, messages: List[Dict[str, str]]) -> str:
@@ -223,68 +320,65 @@ def parse_action(response_text: str) -> str:
         line = _PREAMBLE_RE.sub("", line).strip()
         parts = line.split()
         if parts and parts[0].lower() in VALID_VERBS:
-            return line  # Return the whole line (verb + args)
+            return line
 
-    # Last-resort: return first non-empty line cleaned up
     first = response_text.strip().splitlines()[0].strip() if response_text.strip() else ""
     first = _PREAMBLE_RE.sub("", first).strip()
     return first if first else FALLBACK_ACTION
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Agent loop (one task)
+#  Agent loop — WebSocket (PRIMARY, stateful)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Maximum number of retry attempts for reset when server is unavailable
 RESET_RETRIES = 3
-RESET_RETRY_DELAY_S = 5  # seconds between retries
+RESET_RETRY_DELAY_S = 5
 
 
-def run_task(llm_client: Any, env: EnvHttpClient, task_name: str) -> None:
-    """Run one complete task episode and emit structured logs."""
+async def run_task_ws(llm_client: Any, base_url: str, task_name: str) -> None:
+    """Run one complete task episode via WebSocket and emit structured logs."""
     log_start(task=task_name, env=ENV_NAME, model=MODEL_NAME)
 
     rewards: List[float] = []
     steps_taken = 0
     success = False
-    history: List[str] = []
-    episode_aborted = False
+
+    env = EnvWSClient(base_url)
 
     try:
-        # ── Reset (with retries for server startup delay) ──────────────────
-        obs = None
-        last_reset_error: Optional[str] = None
+        # Connect with retries
+        last_err: Optional[str] = None
         for attempt in range(1, RESET_RETRIES + 1):
             try:
-                obs = env.reset(task_name=task_name)
-                last_reset_error = None
+                await env._connect()
+                last_err = None
                 break
             except Exception as exc:
-                last_reset_error = str(exc)
-                print(
-                    f"[DEBUG] reset attempt {attempt}/{RESET_RETRIES} failed: {exc}",
-                    file=sys.stderr, flush=True,
-                )
+                last_err = str(exc)
+                print(f"[DEBUG] WS connect attempt {attempt}/{RESET_RETRIES} failed: {exc}",
+                      file=sys.stderr, flush=True)
                 if attempt < RESET_RETRIES:
                     time.sleep(RESET_RETRY_DELAY_S)
 
-        if obs is None:
-            # All reset attempts failed. Emit one synthetic step at the neutral
-            # score (0.5) so the validator always sees a non-empty rewards list.
-            FALLBACK_REWARD = 0.5  # strictly inside (0, 1)
-            log_step(step=1, action="reset", reward=FALLBACK_REWARD, done=True,
-                     error=last_reset_error or "reset failed")
-            rewards.append(FALLBACK_REWARD)
+        if last_err is not None:
+            # All connection attempts failed
+            fallback_r = 0.5
+            log_step(1, "connect", fallback_r, True, last_err)
+            rewards.append(fallback_r)
             steps_taken = 1
-            episode_aborted = True
             return
+
+        # Reset
+        obs = await env.reset(task_name)
+
+        history: List[str] = []
 
         for step_idx in range(1, MAX_STEPS + 1):
             if obs.done:
                 success = obs.reward > 0.5
                 break
 
-            # ── Build prompt ──────────────────────────────────────────
+            # Build prompt
             history_text = "\n".join(history[-6:]) if history else "None"
             user_content = textwrap.dedent(f"""
                 CURRENT OBSERVATION:
@@ -302,7 +396,6 @@ def run_task(llm_client: Any, env: EnvHttpClient, task_name: str) -> None:
                 Reply with EXACTLY ONE command to take next.
             """).strip()
 
-            # ── Call LLM ─────────────────────────────────────────────
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},
@@ -310,48 +403,135 @@ def run_task(llm_client: Any, env: EnvHttpClient, task_name: str) -> None:
             response_text = _call_llm(llm_client, messages)
             action_str = parse_action(response_text)
 
-            # ── Step environment ──────────────────────────────────────
+            # Step
+            try:
+                obs = await env.step(action_str)
+            except Exception as exc:
+                print(f"[DEBUG] WS step failed: {exc}", file=sys.stderr, flush=True)
+                fallback_r = 0.5
+                log_step(step_idx, action_str, fallback_r, True, str(exc))
+                rewards.append(fallback_r)
+                steps_taken = step_idx
+                break
+
+            reward = obs.reward     # already clamped by _WSObs
+            done = obs.done
+
+            rewards.append(reward)
+            steps_taken = step_idx
+            log_step(step_idx, action_str, reward, done, None)
+            history.append(f"Step {step_idx}: {action_str} -> reward {reward:.4f}")
+
+            if done:
+                success = reward > 0.5
+                break
+
+        else:
+            success = False
+
+    finally:
+        await env.close()
+        if not rewards:
+            rewards.append(0.5)
+        log_end(success=success, steps=steps_taken, rewards=rewards)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Agent loop — HTTP fallback (STATELESS, used only if websockets unavailable)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_task_http(llm_client: Any, base_url: str, task_name: str) -> None:
+    """Fallback HTTP-based episode runner (stateless — each step is a fresh env)."""
+    log_start(task=task_name, env=ENV_NAME, model=MODEL_NAME)
+
+    rewards: List[float] = []
+    steps_taken = 0
+    success = False
+    history: List[str] = []
+    episode_aborted = False
+
+    env = EnvHTTPClient(base_url)
+
+    try:
+        # Reset with retries
+        obs = None
+        last_reset_error: Optional[str] = None
+        for attempt in range(1, RESET_RETRIES + 1):
+            try:
+                obs = env.reset(task_name=task_name)
+                last_reset_error = None
+                break
+            except Exception as exc:
+                last_reset_error = str(exc)
+                print(f"[DEBUG] HTTP reset attempt {attempt}/{RESET_RETRIES} failed: {exc}",
+                      file=sys.stderr, flush=True)
+                if attempt < RESET_RETRIES:
+                    time.sleep(RESET_RETRY_DELAY_S)
+
+        if obs is None:
+            fallback_r = 0.5
+            log_step(1, "reset", fallback_r, True, last_reset_error or "reset failed")
+            rewards.append(fallback_r)
+            steps_taken = 1
+            episode_aborted = True
+            return
+
+        for step_idx in range(1, MAX_STEPS + 1):
+            if obs.done:
+                success = obs.reward > 0.5
+                break
+
+            history_text = "\n".join(history[-6:]) if history else "None"
+            user_content = textwrap.dedent(f"""
+                CURRENT OBSERVATION:
+                {obs.output}
+
+                System state:
+                  Severity:          {obs.severity.upper()}
+                  Active alerts:     {obs.alert_count}
+                  Affected services: {', '.join(obs.affected_services) or 'none'}
+                  Sim time:          {obs.timestamp}
+
+                Recent actions:
+                {history_text}
+
+                Reply with EXACTLY ONE command to take next.
+            """).strip()
+
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ]
+            response_text = _call_llm(llm_client, messages)
+            action_str = parse_action(response_text)
+
             try:
                 obs = env.step(action_str)
             except Exception as exc:
-                print(f"[DEBUG] env.step failed: {exc}", file=sys.stderr, flush=True)
-                # Emit a mid-episode error step with a neutral valid reward
-                FALLBACK_REWARD = 0.5
-                log_step(step=step_idx, action=action_str, reward=FALLBACK_REWARD,
-                         done=True, error=str(exc))
-                rewards.append(FALLBACK_REWARD)
+                print(f"[DEBUG] HTTP step failed: {exc}", file=sys.stderr, flush=True)
+                fallback_r = 0.5
+                log_step(step_idx, action_str, fallback_r, True, str(exc))
+                rewards.append(fallback_r)
                 steps_taken = step_idx
-                success = False
                 episode_aborted = True
-                break  # Break instead of return so finally always runs
+                break
 
             if not episode_aborted:
-                reward = float(obs.reward)
-                # Clamp strictly into the open interval (0, 1) as required.
-                # We use 0.01 / 0.99 as safe inner boundaries.
-                if not (0.0 < reward < 1.0) or reward <= 0.0 or reward >= 1.0:
-                    reward = max(0.01, min(0.99, reward))
+                reward = obs.reward   # already clamped by _HTTPObs
                 done = obs.done
-
                 rewards.append(reward)
                 steps_taken = step_idx
-
-                log_step(step=step_idx, action=action_str, reward=reward, done=done, error=None)
+                log_step(step_idx, action_str, reward, done, None)
                 history.append(f"Step {step_idx}: {action_str} -> reward {reward:.4f}")
-
                 if done:
                     success = reward > 0.5
                     break
 
         else:
-            # MAX_STEPS exhausted without done=True
             success = False
 
     finally:
-        # ALWAYS emit [END] — even on reset failures or mid-episode errors.
-        # The validator requires at least one entry in the rewards list.
         if not rewards:
-            # Safety fallback: if somehow rewards is still empty, add a neutral score.
             rewards.append(0.5)
         log_end(success=success, steps=steps_taken, rewards=rewards)
 
@@ -368,7 +548,6 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # Import OpenAI here so a missing install gives a clear message
     try:
         from openai import OpenAI
     except ImportError:
@@ -377,11 +556,24 @@ def main() -> None:
 
     llm_client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
-    # Connect to the already-running environment server via plain HTTP
-    env = EnvHttpClient(base_url=INCIDENT_BASE_URL)
+    # Try WebSocket path first (stateful, graders are correctly invoked)
+    try:
+        import websockets  # noqa: F401 — just checking availability
+        import asyncio
 
-    for task in TASKS:
-        run_task(llm_client=llm_client, env=env, task_name=task)
+        print("[INFO] Using WebSocket client (stateful episodes)", file=sys.stderr, flush=True)
+
+        async def run_all_ws() -> None:
+            for task in TASKS:
+                await run_task_ws(llm_client, INCIDENT_BASE_URL, task)
+
+        asyncio.run(run_all_ws())
+
+    except ImportError:
+        # websockets not available — fall back to HTTP
+        print("[INFO] websockets not available, using HTTP fallback", file=sys.stderr, flush=True)
+        for task in TASKS:
+            run_task_http(llm_client, INCIDENT_BASE_URL, task)
 
 
 if __name__ == "__main__":
