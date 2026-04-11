@@ -55,23 +55,15 @@ def read_root():
     # By returning the environment metadata directly on the root endpoint, 
     # the browser will immediately display the rich JSON payload.
     return {
-        "name": "incident-ops-env",
+        "name": "incident_ops_env",
+        "description": "IncidentOps SRE training environment.",
         "version": "1.0.0",
         "spec": "openenv",
         "tasks": [
             "service-restart",
             "config-drift",
             "cascading-failure"
-        ],
-        "endpoints": [
-            "/reset",
-            "/step",
-            "/state",
-            "/metadata",
-            "/schema",
-            "/health"
-        ],
-        "note": "All /step and /state calls require a session_id from /reset."
+        ]
     }
 
 def main() -> None:
