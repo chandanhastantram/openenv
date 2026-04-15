@@ -287,6 +287,6 @@ A perfect agent would score ~0.95 on all tasks. These baseline scores leave sign
 
 ---
 
-## License
+## License 
 
 MIT License. See [LICENSE](LICENSE) file.
